@@ -1,11 +1,11 @@
+use serde::{Deserialize, Serialize};
+use serde_json;
+use std::collections::HashMap;
 use std::error::Error;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::result::Result;
-use std::collections::HashMap;
-use serde_json;
-use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 /*
  * TODO: Store jobs in a global HashMap<job_id: u32, Job> and replace
@@ -37,7 +37,7 @@ static JOBID_COUNTER: Mutex<u32> = Mutex::new(0);
 static SHUTDOWN: Mutex<bool> = Mutex::new(false);
 
 #[allow(dead_code)]
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 struct JobSpec {
     script: String,
     #[serde(default = "Vec::<String>::new")]
@@ -67,10 +67,11 @@ struct Job {
 
 impl Job {
     fn start(&mut self) -> Result<(), Box<dyn Error>> {
-
-        self.process = Some(std::process::Command::new(&self.job_spec.script)
-            .args(&self.job_spec.job_args)
-            .spawn()?);
+        self.process = Some(
+            std::process::Command::new(&self.job_spec.script)
+                .args(&self.job_spec.job_args)
+                .spawn()?,
+        );
         Ok(())
     }
     #[allow(dead_code)]
@@ -106,41 +107,41 @@ enum HttpMethod {
 #[allow(dead_code)]
 #[derive(Debug)]
 struct HttpRequest {
-    method:  HttpMethod,
+    method: HttpMethod,
     headers: Vec<String>, // TODO: Change to HashMap
-    path:    String,
-    query:   HashMap<String,String>,
-    body:    String, // Could be bytes but I'm only going to be doing strings
+    path: String,
+    query: HashMap<String, String>,
+    body: String, // Could be bytes but I'm only going to be doing strings
 }
 #[allow(dead_code)]
 #[derive(Debug)]
 struct HttpResponse {
     code: u32,
-    headers: HashMap<String,String>,
+    headers: HashMap<String, String>,
     body: Vec<u8>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:7878")?;
 
-    let scheduler_thread = std::thread::spawn(|| {
-        loop {
-            if let Err(e) = schedule() {
-                println!("Error in schedule function: {e}, terminating thread");
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            let mg = SHUTDOWN.lock();
-            match mg {
-                Ok(mg) => {
-                    if *mg {
-                        return;
-                    }
-                },
-                Err(e) => {
-                    println!("scheduler_thread: Could not acquire lock on SHUTDOWN: terminating thread: {e}");
+    let scheduler_thread = std::thread::spawn(|| loop {
+        if let Err(e) = schedule() {
+            println!("Error in schedule function: {e}, terminating thread");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let mg = SHUTDOWN.lock();
+        match mg {
+            Ok(mg) => {
+                if *mg {
                     return;
                 }
+            }
+            Err(e) => {
+                println!(
+                    "scheduler_thread: Could not acquire lock on SHUTDOWN: terminating thread: {e}"
+                );
+                return;
             }
         }
     });
@@ -207,7 +208,11 @@ fn get_content_type(header: &Vec<String>) -> Result<String, Box<dyn Error>> {
     for l in header {
         if l.starts_with("Content-Type") {
             let split: Vec<_> = l.split(":").collect();
-            return Ok(split.get(1).ok_or("Invalid Content-Type header")?.trim().to_string());
+            return Ok(split
+                .get(1)
+                .ok_or("Invalid Content-Type header")?
+                .trim()
+                .to_string());
         }
     }
     Err("No content type".into())
@@ -221,28 +226,43 @@ fn parse_request(stream: &mut TcpStream) -> Result<HttpRequest, Box<dyn Error>> 
     let body = get_body(&mut buf_reader, size)?;
     let uri_pieces: Vec<_> = uri.split("?").map(|s| s.to_string()).collect();
     let path = uri_pieces.get(0).ok_or("No path in request")?.to_string();
-    let first_line: Vec<_> = headers.get(0).ok_or("No first line in header")?.split(" ").collect();
-    let method = match first_line.get(0).ok_or("Empty first component")?.to_uppercase().as_str() {
-        "POST"    => HttpMethod::Post,
-        "GET"     => HttpMethod::Get,
-        "PUT"     => HttpMethod::Put,
-        "DELETE"  => HttpMethod::Delete,
-        m         => {return Err(format!("Invalid method: '{m}'").into());},
+    let first_line: Vec<_> = headers
+        .get(0)
+        .ok_or("No first line in header")?
+        .split(" ")
+        .collect();
+    let method = match first_line
+        .get(0)
+        .ok_or("Empty first component")?
+        .to_uppercase()
+        .as_str()
+    {
+        "POST" => HttpMethod::Post,
+        "GET" => HttpMethod::Get,
+        "PUT" => HttpMethod::Put,
+        "DELETE" => HttpMethod::Delete,
+        m => {
+            return Err(format!("Invalid method: '{m}'").into());
+        }
     };
-    let mut query_map = HashMap::<String,String>::new();
+    let mut query_map = HashMap::<String, String>::new();
     if let Some(query) = uri_pieces.get(1) {
         for kv in query.split("&") {
             println!("kv = '{kv}'");
             if kv.is_empty() {
-                continue
+                continue;
             }
             let split: Vec<_> = kv.split("=").collect();
-            let k = split.get(0).ok_or(format!("Invalid query part: '{}'", kv))?;
-            let v = split.get(1).ok_or(format!("Invalid query part: '{}'", kv))?;
+            let k = split
+                .get(0)
+                .ok_or(format!("Invalid query part: '{}'", kv))?;
+            let v = split
+                .get(1)
+                .ok_or(format!("Invalid query part: '{}'", kv))?;
             query_map.insert(k.to_string(), v.to_string());
         }
     }
-    Ok(HttpRequest{
+    Ok(HttpRequest {
         method,
         path,
         query: query_map,
@@ -258,7 +278,7 @@ fn send_response(resp: &HttpResponse, stream: &mut TcpStream) -> Result<(), Box<
     } else {
         stream.write_all("ERROR\r\n".as_bytes())?;
     }
-    for (k,v) in &resp.headers {
+    for (k, v) in &resp.headers {
         stream.write_all(format!("{k}: {v}\r\n").as_bytes())?;
     }
     stream.write_all(format!("Content-Length: {}\r\n", resp.body.len()).as_bytes())?;
@@ -306,12 +326,13 @@ fn handle_submit(request: &HttpRequest, mut stream: TcpStream) -> Result<(), Box
     };
     // println!("{:#?}", job);
     QUEUE.lock()?.push(job);
-    let mut resp = HttpResponse{
+    let mut resp = HttpResponse {
         code: 200,
-        headers: HashMap::<String,String>::new(),
+        headers: HashMap::<String, String>::new(),
         body: format!("{}", job_id).as_bytes().to_owned(),
     };
-    resp.headers.insert("Content-Type".to_string(), "application/json".to_string());
+    resp.headers
+        .insert("Content-Type".to_string(), "application/json".to_string());
     send_response(&resp, &mut stream)?;
     Ok(())
 }
@@ -322,12 +343,13 @@ fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
         "/shutdown" => handle_shutdown(stream),
         "/submit" => handle_submit(&request, stream),
         _ => {
-            let mut resp = HttpResponse{
+            let mut resp = HttpResponse {
                 code: 200,
-                headers: HashMap::<String,String>::new(),
+                headers: HashMap::<String, String>::new(),
                 body: request.body.as_bytes().to_owned(),
             };
-            resp.headers.insert("Content-Type".to_string(), "application/json".to_string());
+            resp.headers
+                .insert("Content-Type".to_string(), "application/json".to_string());
             send_response(&resp, &mut stream)?;
             Ok(())
         }
@@ -338,7 +360,7 @@ fn schedule() -> Result<(), Box<dyn Error>> {
     let mut job: Option<Job> = None;
     {
         let mut queue_mg = QUEUE.lock()?;
-        if ! queue_mg.is_empty() {
+        if !queue_mg.is_empty() {
             job = queue_mg.pop();
         }
     }
