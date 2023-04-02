@@ -1,11 +1,22 @@
 #!/bin/bash
 
+#
+# Abandonning this because composing JSON dynamically was becoming too annoying
+#
+
 # $1 script to submit
 # ${2...} other ord_soumet args
+addr="localhost"
+port="7878"
 
 pyrealpath(){
     python3 -c "import os; print(os.path.realpath('$1'))"
 }
+
+if [[ "${1}" == "-s" ]] ; then
+    curl -X POST ${addr}:${port}/shutdown
+    exit $?
+fi
 
 this_dir="$(dirname "$(pyrealpath $0)")"
 if [[ ${1} == "-" ]] ; then
@@ -15,7 +26,20 @@ if [[ ${1} == "-" ]] ; then
 else
     script=${1}
 fi
+shift
 script="$(pyrealpath "${script}")"
+
+submit_request_json=mktemp(submit_request_json.XXXXX)
+printf "{\n\t\"script\": \"%s\",\n" "${script}" >> ${submit_request_json}
+printf "\t\"submit_args\": {\n" >> ${submit_request_json}
+while (( $# > 0 )) ; do
+    case $1 in
+        -cpu|-c) printf "\t\t\"CPU\": \"%s\"\n" "$2" >> ${submit_request_json} ; shift ;;
+
+        --) shift ; break ;;
+    esac
+    shift
+done
 
 request_json="{
     \"script\":\"${script}\",
@@ -32,7 +56,7 @@ content_length=${#request_json}
 # echo "content_length=${content_length}"
 # http_version=--http0.9
 if ! jobid=$(
-curl ${http_version} localhost:7878/submit \
+curl ${http_version} ${addr}:${port}/submit \
     -X POST \
     -H "Content-Type: application/json" \
     -H "Content-Length: ${#request_json}" \

@@ -106,7 +106,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
 SCHEDULER = Scheduler()
 handler = APIHandler
-httpd = HTTPServer(('localhost', 8080), handler)
+httpd = HTTPServer(('localhost', 7878), handler)
 httpd.timeout = 1
 while True:
     httpd.handle_request()
