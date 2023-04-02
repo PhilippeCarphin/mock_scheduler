@@ -4,8 +4,19 @@ import json
 import time
 import subprocess
 
-class BullshitError(Exception):
-    pass
+#
+# Basic scheduler prototype.  It listens for HTTP requests for requests
+# containing a script to run.
+#
+# It is single threaded and uses a loop to check for requests and run jobs.
+#
+# Because I'm a Rustacean now, the main implementation is the rust one but I
+# still want to keep this one functionnal and compatible with my ord_soumet
+# tool.
+#
+
+keep_going = True
+
 class Job:
     def __init__(self, job_spec, jobid):
         self.running = False
@@ -14,18 +25,20 @@ class Job:
         self.job_spec = job_spec
     def start(self):
         try:
-            self.process = subprocess.Popen(self.job_spec.script)
+            self.process = subprocess.Popen([self.job_spec.script, *self.job_spec.args])
         except Exception as e:
             print(f"OOPSIE POOPSIE: {e}")
             return False
         return True
     def __str__(self):
         pid = self.process.pid if self.process else None
-        return f"JOBID: {self.jobid}, PID: {pid}, SCRIPT: {self.job_spec.script}"
+        return f"JOBID: {self.jobid}, PID: {pid}, SCRIPT: {self.job_spec.script}, JOB_ARGS={self.job_spec.args}, SUBMIT_ARGS: {self.job_spec.submit_args}"
 
 class JobSpec:
     def __init__(self, script, **kwargs):
         self.script = script
+        self.args = kwargs.get('args', [])
+        self.submit_args = kwargs.get('submit_args', [])
         self.kwargs = kwargs
 
 class Scheduler:
@@ -50,11 +63,7 @@ class Scheduler:
                     self.current_job = None
         else:
             poll = self.current_job.process.poll()
-            if poll is None:
-                # print(f" Job with id {self.current_job.jobid}, pid {self.current_job.process.pid} IS RUNNING")
-                pass
-            else:
-                # print(f" Job ended ")
+            if poll is not None:
                 print(f"==== Job {self.current_job} finished")
                 self.current_job = None
 
@@ -66,49 +75,46 @@ class APIHandler(BaseHTTPRequestHandler):
             self.handle_delete()
         elif self.path == '/status':
             self.handle_status()
-        elif self.path == '/fruits':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            fruits = ['apple', 'banana', 'mango']
-            self.wfile.write(json.dumps(fruits).encode())
+        elif self.path == '/shutdown':
+            self.handle_shutdown()
         else:
-            print(self)
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'hello':'world', 'number': 8}, indent=4).encode() + b'\n')
+            self.send_response(404)
     def get_request_body_json(self):
         content_length = int(self.headers['Content-Length'])
         return json.loads(self.rfile.read(content_length))
     def handle_submit(self):
         request_body = self.get_request_body_json()
-        new_job = SCHEDULER.submit(JobSpec(script=request_body['script']))
+        new_job = SCHEDULER.submit(
+            JobSpec(
+                script=request_body['script'],
+                args=request_body['job_args'],
+                submit_args=request_body['submit_args']
+            )
+        )
         output = f"Jobid is {new_job.jobid}".encode()
-
-        # NOTE: self.send_response() needs to come before starting
-        # to set the headers.  Otherwise, we end up with an invalid HTTP
-        # response to which cURL will say
-        #      curl: (1) Received HTTP/0.9 when not allowed
-        # and exit with an error code of 1.
-        # I wasted about 30 minutes searching for how to set the protocol
-        # for the response to 'not 0.9' only to find out that it was already
-        # not 0.9 and more googling to find out that this cURL message could
-        # be due to malformed HTTP response, at which point I tried random
-        # changes until I moved the send_response call to the top
         self.send_response(200)
         self.send_header('Content-Type', 'application/text')
-        # self.send_header('Content-Length', str(len(output)))
         self.end_headers()
         self.wfile.write(output)
-
-
+    def handle_shutdown(self):
+        global keep_going
+        keep_going = False
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/text')
+        self.end_headers()
+        self.wfile.write(b'Shutdown acknowledged\n')
 
 SCHEDULER = Scheduler()
 handler = APIHandler
 httpd = HTTPServer(('localhost', 7878), handler)
 httpd.timeout = 1
-while True:
-    httpd.handle_request()
-    SCHEDULER.schedule()
-    time.sleep(1)
+
+try:
+    while keep_going:
+        httpd.handle_request()
+        SCHEDULER.schedule()
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("")
+    pass
+
