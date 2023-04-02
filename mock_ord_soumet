@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# $1 script to submit
+# ${2...} other ord_soumet args
+
+pyrealpath(){
+    python3 -c "import os; print(os.path.realpath('$1'))"
+}
+
+this_dir="$(dirname "$(pyrealpath $0)")"
+if [[ ${1} == "-" ]] ; then
+    script=$(mktemp ord_soumet.XXXXX)
+    cat >> ${script}
+    chmod +x ${script}
+else
+    script=${1}
+fi
+script="$(pyrealpath "${script}")"
+
+request_json="
+    {\"script\":\"${script}\"
+}"
+
+content_length=${#request_json}
+# echo "request_json='${request_json}'"
+# echo "content_length=${content_length}"
+# http_version=--http0.9
+if ! jobid=$(
+/opt/homebrew/opt/curl/bin/curl ${http_version} localhost:8080/submit \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -H "Content-Length: ${#request_json}" \
+    -d "${request_json}"
+) ; then
+    echo "Some bullshit with http probably"
+    exit 1
+fi
+echo "Job id is '${jobid}'"
+
+
+

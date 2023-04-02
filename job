@@ -1,0 +1,7 @@
+#!/bin/bash
+p=$(realpath $0)
+
+for((i=0;i<3;i++)) ; do
+sleep 2
+echo "$p: (PID=$$) i = $i"
+done
