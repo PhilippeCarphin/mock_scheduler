@@ -32,9 +32,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
 
     for stream in listener.incoming() {
-        let stream = stream.unwrap();
-
-        handle_connection(stream)?;
+        if let Err(e) = handle_connection(stream?) {
+            println!("Error handling connection: {:?}", e);
+        } else {
+            println!("Successfully handled connection!");
+        }
     }
     Ok(())
 }
@@ -112,7 +114,6 @@ fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
                 body
             )
             .as_bytes(),
-        )
-        .unwrap();
+        )?;
     Ok(())
 }
