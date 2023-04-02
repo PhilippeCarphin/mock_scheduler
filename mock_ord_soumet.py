@@ -41,7 +41,11 @@ p = argparse.ArgumentParser()
 p.add_argument("-cpu", help="Number of cores")
 p.add_argument("-m", help="Memory")
 p.add_argument("-w", help="Wallclock")
-submit_args = p.parse_args(submit_args)
+submit_args_namespace = p.parse_args(submit_args)
+submit_args = {}
+for k,v in submit_args_namespace.__dict__.items():
+    if v is not None:
+        submit_args[k] = v
 
 #
 # The arguments after '--' are arguments meant to be passed to the script
@@ -55,7 +59,7 @@ job_args = argv
 request_dict = {
     'script': script,
     'job_args': job_args,
-    'submit_args': submit_args.__dict__
+    'submit_args': submit_args
 }
-r = requests.post("http://localhost:7878/submit", json.dumps(request_dict), headers={"Content-Type": "application/json"})
+r = requests.post("http://localhost:7878/submit", json.dumps(request_dict, indent=4), headers={"Content-Type": "application/json"})
 

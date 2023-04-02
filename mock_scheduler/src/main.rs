@@ -148,7 +148,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _tcp_thread = std::thread::spawn(move || {
         for stream in listener.incoming() {
             if let Err(e) = handle_connection(stream.expect("Bad Stream")) {
-                println!("Error handling connection: {:?}", e);
+                println!("Error handling connection: {}", e);
             } else {
                 println!("Successfully handled connection!");
             }
@@ -268,27 +268,28 @@ fn send_response(resp: &HttpResponse, stream: &mut TcpStream) -> Result<(), Box<
 }
 
 fn handle_shutdown(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
-
     println!("Shutdown request received!!!!!");
     *SHUTDOWN.lock()? = true;
     let mut resp = HttpResponse {
         code: 200,
-        headers: HashMap::<String,String>::new(),
+        headers: HashMap::<String, String>::new(),
         body: "Shutting down scheduler\n".as_bytes().to_owned(),
     };
-    resp.headers.insert("Content-Type".to_string(), "application/text".to_string());
+    resp.headers
+        .insert("Content-Type".to_string(), "application/text".to_string());
     send_response(&resp, &mut stream)?;
     Ok(())
 }
 
 fn handle_submit(request: &HttpRequest, mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
-
     if get_content_type(&request.headers)? != "application/json" {
         return Err("Expected Content-Type: application/json".into());
     }
-    let sr: JobSpec = serde_json::from_str(&request.body)?;
-    let job_id: u32 =
-    {
+    println!("Request body = {}", request.body);
+    let job_spec: JobSpec = serde_json::from_str(&request.body).map_err(|e| -> Box<dyn Error> {
+        format!("Could not parse JSON: '{}': {}", request.body, e).into()
+    })?;
+    let job_id: u32 = {
         // I think MutexGuard implements the deref trait so that
         // *mg is the u32 inside the MutexGuard which allows us to
         // change get or change the jobid.
@@ -296,8 +297,8 @@ fn handle_submit(request: &HttpRequest, mut stream: TcpStream) -> Result<(), Box
         *mg += 1;
         *mg
     };
-    let job = Job{
-        job_spec: sr,
+    let job = Job {
+        job_spec,
         job_id,
         status: JobStatus::Submitted,
         running: false,
