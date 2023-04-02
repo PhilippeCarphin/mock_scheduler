@@ -17,8 +17,14 @@ else
 fi
 script="$(pyrealpath "${script}")"
 
-request_json="
-    {\"script\":\"${script}\"
+request_json="{
+    \"script\":\"${script}\",
+    \"job_args\": [\"-arg\", \"arg-value\", \"posarg1\"],
+    \"submit_args\": {
+        \"CPU\": \"80\",
+        \"Memory\": \"8G\",
+        \"Wallclock\": \"10\"
+    }
 }"
 
 content_length=${#request_json}
@@ -26,7 +32,7 @@ content_length=${#request_json}
 # echo "content_length=${content_length}"
 # http_version=--http0.9
 if ! jobid=$(
-/opt/homebrew/opt/curl/bin/curl ${http_version} localhost:8080/submit \
+curl ${http_version} localhost:7878/submit \
     -X POST \
     -H "Content-Type: application/json" \
     -H "Content-Length: ${#request_json}" \

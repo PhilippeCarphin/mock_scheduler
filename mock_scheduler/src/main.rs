@@ -3,30 +3,62 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::result::Result;
-/*
- * This test demonstrates a simple HTTP server handling requests and reading
- * the body.
- *
- * The tutorial in the Rust Book showed a simple way to read the header of the
- * request by reading from a TCP stream until an empty line and then returning
- * some HTML.
- *
- * However it took me a while to figure out how to read the request body
- * because I was trying things like buf_reader.read_to_string(&s).  This would
- * block because I did not understand that the stream itself does not know
- * when it ends.
- *
- * We need to get the content length out of the header and read that many bytes
- * from the stream.
- *
- * The process is as follows, with buf_reader = BufReader::new(&mut stream):
- * - Use buf_reader.read_line(&s) to create a Vec<String>.  This stores the
- *   header in a form that is easy to manipulate.
- *   This is the function get_header
- * - Iterate over the Vec<String> header to find the Content-Lenght.
- * - Read exactly that number of bytes from the stream (buf_reader).
- *
- */
+use std::collections::HashMap;
+use serde_json;
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+
+static QUEUE: Mutex<Vec<Job>> = Mutex::new(Vec::<Job>::new());
+static JOBID_COUNTER: Mutex<u32> = Mutex::new(0);
+
+#[allow(dead_code)]
+#[derive(Debug,Deserialize)]
+struct JobSpec {
+    script: String,
+    #[serde(default = "Vec::<String>::new")]
+    job_args: Vec<String>,
+    #[serde(default = "HashMap::<String,String>::new")]
+    submit_args: HashMap<String, String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct Job {
+    job_spec: JobSpec,
+    job_id: u32,
+    running: bool,
+    process: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct SubmitResponse {
+    job_id: i32,
+}
+
+#[derive(Debug)]
+enum HttpMethod {
+    Post,
+    Get,
+    Put,
+    Delete,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct HttpRequest {
+    method:  HttpMethod,
+    headers: Vec<String>, // TODO: Change to HashMap
+    path:    String,
+    query:   HashMap<String,String>,
+    body:    String, // Could be bytes but I'm only going to be doing strings
+}
+#[allow(dead_code)]
+#[derive(Debug)]
+struct HttpResponse {
+    code: u32,
+    headers: HashMap<String,String>,
+    body: Vec<u8>,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
@@ -89,31 +121,98 @@ fn get_uri(header: &Vec<String>) -> Result<String, Box<dyn Error>> {
     Ok((*uri).to_string())
 }
 
-fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
-    let mut buf_reader = BufReader::new(&mut stream);
-    let header = read_header(&mut buf_reader)?;
-    let uri = get_uri(&header)?;
-    let size = get_content_length(&header)?;
+fn get_content_type(header: &Vec<String>) -> Result<String, Box<dyn Error>> {
+    for l in header {
+        if l.starts_with("Content-Type") {
+            let split: Vec<_> = l.split(":").collect();
+            return Ok(split.get(1).ok_or("Invalid Content-Type header")?.trim().to_string());
+        }
+    }
+    Err("No content type".into())
+}
+
+fn parse_request(stream: &mut TcpStream) -> Result<HttpRequest, Box<dyn Error>> {
+    let mut buf_reader = BufReader::new(stream);
+    let headers = read_header(&mut buf_reader)?;
+    let uri = get_uri(&headers)?;
+    let size = get_content_length(&headers)?;
     let body = get_body(&mut buf_reader, size)?;
-    println!("HEADER: {:#?}", header);
     let uri_pieces: Vec<_> = uri.split("?").map(|s| s.to_string()).collect();
-    let path = uri_pieces.get(0).ok_or("No path in request")?;
-    let query = uri_pieces.get(1);
-    println!("PATH: {path}");
-    println!("QUERY: {:?}", query);
-    println!("{}", body);
-    // Just making sure length returns the number length in bytes which seems
-    // to be the case.  I tested by sending a request containing emojis and
-    // accented characters so doing 'as_bytes' is not necessary.
-    println!("byte_length = {}, string_length = {}", body.as_bytes().len(), body.len());
-    stream
-        .write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/text\r\nContent-Length: {}\r\n\r\n{}\r\n",
-                body.len()+2,
-                body
-            )
-            .as_bytes(),
-        )?;
+    let path = uri_pieces.get(0).ok_or("No path in request")?.to_string();
+    let first_line: Vec<_> = headers.get(0).ok_or("No first line in header")?.split(" ").collect();
+    let method = match first_line.get(0).ok_or("Empty first component")?.to_uppercase().as_str() {
+        "POST"    => HttpMethod::Post,
+        "GET"     => HttpMethod::Get,
+        "PUT"     => HttpMethod::Put,
+        "DELETE"  => HttpMethod::Delete,
+        m         => {return Err(format!("Invalid method: '{m}'").into());},
+    };
+    let mut query_map = HashMap::<String,String>::new();
+    if let Some(query) = uri_pieces.get(1) {
+        for kv in query.split("&") {
+            println!("kv = '{kv}'");
+            if kv.is_empty() {
+                continue
+            }
+            let split: Vec<_> = kv.split("=").collect();
+            let k = split.get(0).ok_or(format!("Invalid query part: '{}'", kv))?;
+            let v = split.get(1).ok_or(format!("Invalid query part: '{}'", kv))?;
+            query_map.insert(k.to_string(), v.to_string());
+        }
+    }
+    Ok(HttpRequest{
+        method,
+        path,
+        query: query_map,
+        headers,
+        body,
+    })
+}
+
+fn send_response(resp: &HttpResponse, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+    stream.write_all(format!("HTTP/1.1 {} ", resp.code).as_bytes())?;
+    if resp.code == 200 {
+        stream.write_all("OK\r\n".as_bytes())?;
+    } else {
+        stream.write_all("ERROR\r\n".as_bytes())?;
+    }
+    for (k,v) in &resp.headers {
+        stream.write_all(format!("{k}: {v}\r\n").as_bytes())?;
+    }
+    stream.write_all(format!("Content-Length: {}\r\n", resp.body.len()).as_bytes())?;
+    stream.write_all("\r\n".as_bytes())?;
+    stream.write_all(&resp.body)?;
+    Ok(())
+}
+
+fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
+    let request = parse_request(&mut stream)?;
+    if get_content_type(&request.headers)? == "application/json" {
+        let sr: JobSpec = serde_json::from_str(&request.body)?;
+        let job_id: u32;
+        {
+            // I think MutexGuard implements the deref trait so that
+            // *mg is the u32 inside the MutexGuard which allows us to
+            // change get or change the jobid.
+            let mut mg = JOBID_COUNTER.lock()?;
+            job_id = *mg;
+            *mg += 1;
+        }
+        let job = Job{
+            job_spec: sr,
+            job_id,
+            running: false,
+            process: None,
+        };
+        println!("{:#?}", job);
+        QUEUE.lock()?.push(job);
+    }
+    let mut resp = HttpResponse{
+        code: 200,
+        headers: HashMap::<String,String>::new(),
+        body: request.body.as_bytes().to_owned(),
+    };
+    resp.headers.insert("Content-Type".to_string(), "application/json".to_string());
+    send_response(&resp, &mut stream)?;
     Ok(())
 }
