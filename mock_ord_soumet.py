@@ -4,6 +4,9 @@ import sys
 import json
 import os
 
+scheduler_host = "localhost"
+scheduler_port = 7878
+
 if len(sys.argv) < 2:
     print("ERROR: This tool requires at least one argument")
     sys.exit(1)
@@ -61,5 +64,6 @@ request_dict = {
     'job_args': job_args,
     'submit_args': submit_args
 }
-r = requests.post("http://localhost:7878/submit", json.dumps(request_dict, indent=4), headers={"Content-Type": "application/json"})
+r = requests.post(f"http://{scheduler_host}:{scheduler_port}/submit", json.dumps(request_dict, indent=4), headers={"Content-Type": "application/json"})
+print(r.text)
 

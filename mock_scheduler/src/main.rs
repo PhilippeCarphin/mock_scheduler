@@ -365,7 +365,7 @@ fn schedule() -> Result<(), Box<dyn Error>> {
         }
     }
     if let Some(mut job) = job {
-        println!("schedule(): Starting job {:#?}", job.job_spec);
+        println!("schedule(): Starting job (jobid = {})  {:#?}", job.job_id, job.job_spec);
         /*
          * NOTE: Job is no longer globally available, therefore a qstat
          * command would not be possible for a running job
