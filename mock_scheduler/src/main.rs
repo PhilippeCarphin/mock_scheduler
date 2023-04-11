@@ -6,10 +6,12 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::result::Result;
-use std::sync::Mutex;
+use std::sync::mpsc::{channel, Receiver, Sender};
+
 /*
- * TODO: Store jobs in a global HashMap<job_id: u32, Job> and replace
- * QUEUE with a vec<u32> of job IDs.  Then
+ * TODO: Store jobs in a HashMap<job_id: u32, Job> inside a thread and make
+ * the queue a Vec<u32> of job ids.
+ *
  * - schedule() will pop a job ID from the queue and run the start command
  * TODO: A real scheduler would start all the jobs it can start if it had
  * infinite resources.  To simulate not having infinite resources, we can
@@ -27,14 +29,6 @@ use std::sync::Mutex;
  * ord_soumet, I'm calling bash.  This just allows me to have an ord_soumet
  * on my mac.
  */
-
-/*
- * Caveman way of sharing state.  I could probably replace all this
- * with channels.
- */
-static QUEUE: Mutex<Vec<Job>> = Mutex::new(Vec::<Job>::new());
-static JOBID_COUNTER: Mutex<u32> = Mutex::new(0);
-static SHUTDOWN: Mutex<bool> = Mutex::new(false);
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
@@ -121,34 +115,65 @@ struct HttpResponse {
     body: Vec<u8>,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind("127.0.0.1:7878")?;
+struct JobStResp {}
 
-    let scheduler_thread = std::thread::spawn(|| loop {
-        if let Err(e) = schedule() {
-            println!("Error in schedule function: {e}, terminating thread");
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        let mg = SHUTDOWN.lock();
-        match mg {
-            Ok(mg) => {
-                if *mg {
-                    return;
-                }
+struct JobDelResp {}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let (jobspec_tx, jobspec_rx): (Sender<JobSpec>, Receiver<JobSpec>) = channel();
+    let (jobid_tx, jobid_rx): (Sender<u32>, Receiver<u32>) = channel();
+
+    let (_jobst_tx, _jobst_rx): (Sender<u32>, Receiver<u32>) = channel();
+    let (_jobdel_tx, _jobdel_rx): (Sender<u32>, Receiver<u32>) = channel();
+
+    let (_jobst_resp_tx, _jobst_resp_rx): (Sender<JobStResp>, Receiver<JobStResp>) = channel();
+    let (_jobdel_resp_tx, _jobdel_resp_rx): (Sender<JobDelResp>, Receiver<JobDelResp>) = channel();
+
+    let (shutdown_tx, shutdown_rx): (Sender<u32>, Receiver<u32>) = channel();
+
+    let scheduler_thread = std::thread::spawn(move || {
+        let mut queue: Vec<Job> = Vec::<Job>::new();
+        let mut jobid_counter: u32 = 0;
+        loop {
+            let job_spec = jobspec_rx.recv_timeout(std::time::Duration::from_secs(1));
+            if let Ok(job_spec) = job_spec {
+                let job_id: u32 = jobid_counter;
+                jobid_counter += 1;
+                let job = Job {
+                    job_spec,
+                    job_id,
+                    status: JobStatus::Submitted,
+                    running: false,
+                    process: None,
+                };
+                queue.push(job);
+                let _ = jobid_tx.send(job_id);
             }
-            Err(e) => {
-                println!(
-                    "scheduler_thread: Could not acquire lock on SHUTDOWN: terminating thread: {e}"
-                );
+
+            if let Err(e) = schedule(&mut queue) {
+                println!("Error in schedule function: {e}, terminating thread");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if shutdown_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_ok()
+            {
+                println!("Shutdown signal received on shutdown_rx in scheduler thread");
                 return;
             }
         }
     });
 
+    let listener = TcpListener::bind("127.0.0.1:7878")?;
     let _tcp_thread = std::thread::spawn(move || {
         for stream in listener.incoming() {
-            if let Err(e) = handle_connection(stream.expect("Bad Stream")) {
+            if let Err(e) = handle_connection(
+                stream.expect("Bad Stream"),
+                &jobspec_tx,
+                &jobid_rx,
+                &shutdown_tx,
+            ) {
                 println!("Error handling connection: {}", e);
             } else {
                 println!("Successfully handled connection!");
@@ -287,21 +312,28 @@ fn send_response(resp: &HttpResponse, stream: &mut TcpStream) -> Result<(), Box<
     Ok(())
 }
 
-fn handle_shutdown(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
+fn handle_shutdown(mut stream: TcpStream, shutdown_tx: &Sender<u32>) -> Result<(), Box<dyn Error>> {
     println!("Shutdown request received!!!!!");
-    *SHUTDOWN.lock()? = true;
     let mut resp = HttpResponse {
         code: 200,
         headers: HashMap::<String, String>::new(),
         body: "Shutting down scheduler\n".as_bytes().to_owned(),
     };
+    println!("Sending empty tuple on shutdown_tx");
+    shutdown_tx.send(42).unwrap();
+    println!("Empty tuple sent successfuly on shutdown_tx");
     resp.headers
         .insert("Content-Type".to_string(), "application/text".to_string());
     send_response(&resp, &mut stream)?;
     Ok(())
 }
 
-fn handle_submit(request: &HttpRequest, mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
+fn handle_submit(
+    request: &HttpRequest,
+    mut stream: TcpStream,
+    jobspec_tx: &Sender<JobSpec>,
+    jobid_rx: &Receiver<u32>,
+) -> Result<(), Box<dyn Error>> {
     if get_content_type(&request.headers)? != "application/json" {
         return Err("Expected Content-Type: application/json".into());
     }
@@ -309,23 +341,9 @@ fn handle_submit(request: &HttpRequest, mut stream: TcpStream) -> Result<(), Box
     let job_spec: JobSpec = serde_json::from_str(&request.body).map_err(|e| -> Box<dyn Error> {
         format!("Could not parse JSON: '{}': {}", request.body, e).into()
     })?;
-    let job_id: u32 = {
-        // I think MutexGuard implements the deref trait so that
-        // *mg is the u32 inside the MutexGuard which allows us to
-        // change get or change the jobid.
-        let mut mg = JOBID_COUNTER.lock()?;
-        *mg += 1;
-        *mg
-    };
-    let job = Job {
-        job_spec,
-        job_id,
-        status: JobStatus::Submitted,
-        running: false,
-        process: None,
-    };
+    jobspec_tx.send(job_spec).unwrap();
+    let job_id = jobid_rx.recv()?;
     // println!("{:#?}", job);
-    QUEUE.lock()?.push(job);
     let mut resp = HttpResponse {
         code: 200,
         headers: HashMap::<String, String>::new(),
@@ -337,11 +355,16 @@ fn handle_submit(request: &HttpRequest, mut stream: TcpStream) -> Result<(), Box
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
+fn handle_connection(
+    mut stream: TcpStream,
+    jobspec_tx: &Sender<JobSpec>,
+    jobid_rx: &Receiver<u32>,
+    shutdown_tx: &Sender<u32>, /*, jobst_tx, jobstres_rx, jobdel_tx, jobdelres_rx, shutdown_tx*/
+) -> Result<(), Box<dyn Error>> {
     let request = parse_request(&mut stream)?;
     match request.path.as_str() {
-        "/shutdown" => handle_shutdown(stream),
-        "/submit" => handle_submit(&request, stream),
+        "/shutdown" => handle_shutdown(stream, shutdown_tx),
+        "/submit" => handle_submit(&request, stream, jobspec_tx, jobid_rx),
         _ => {
             let mut resp = HttpResponse {
                 code: 200,
@@ -356,16 +379,13 @@ fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn schedule() -> Result<(), Box<dyn Error>> {
-    let mut job: Option<Job> = None;
-    {
-        let mut queue_mg = QUEUE.lock()?;
-        if !queue_mg.is_empty() {
-            job = queue_mg.pop();
-        }
-    }
+fn schedule(queue: &mut Vec<Job>) -> Result<(), Box<dyn Error>> {
+    let job: Option<Job> = queue.pop();
     if let Some(mut job) = job {
-        println!("schedule(): Starting job (jobid = {})  {:#?}", job.job_id, job.job_spec);
+        println!(
+            "schedule(): Starting job (jobid = {})  {:#?}",
+            job.job_id, job.job_spec
+        );
         /*
          * NOTE: Job is no longer globally available, therefore a qstat
          * command would not be possible for a running job
